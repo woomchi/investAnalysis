@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const envFile = path.join(ROOT, '.env');
@@ -100,16 +100,20 @@ async function liveAnalysis(ticker) {
 }
 function score(metrics,weights,cutoff=75){const keys=['growth','margin','fcf','debt','valuation'];const w=weights||{growth:25,margin:25,fcf:20,debt:15,valuation:15};const total=keys.reduce((n,k)=>n+(Number(w[k])||0),0);if(total!==100)throw Object.assign(new Error('Weights must sum to 100.'),{status:400});const parts={growth:Math.min(100,Math.max(0,(metrics.growth??0)*.7+25)),margin:Math.min(100,(metrics.margin??0)*1.45),fcf:Math.min(100,(metrics.fcf??0)*1.55),debt:Math.max(0,100-(metrics.debt??100)*1.35),valuation:Math.max(0,100-(metrics.valuation??100)*1.55)};const totalScore=Math.round(keys.reduce((n,k)=>n+parts[k]*Number(w[k]),0)/100);return {score:totalScore,parts,passed:totalScore>=Number(cutoff),cutoff};}
 async function serveFile(res){const html=await readFile(path.join(ROOT,'index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':html.length});res.end(html);}
-const server=http.createServer(async(req,res)=>{
+export async function handleApi(req,res,url=new URL(req.url,'http://localhost')){
   if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'});return res.end();}
-  const url=new URL(req.url,'http://localhost');
   try{
     if(req.method==='GET'&&url.pathname==='/api/health')return json(res,200,{ok:true,mode:MODE,providers:{sec:'available (no API key)',toss:Boolean(TOSS_ID&&TOSS_SECRET)},message:TOSS_ID&&TOSS_SECRET?'Live SEC and Toss data enabled.':'SEC data enabled; Toss credentials missing, so price and valuation may be unavailable.'});
     if(req.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();if(!/^[A-Z.]{1,5}$/.test(ticker))return json(res,400,{error:'Ticker must contain 1–5 letters or dots.'});const data=await liveAnalysis(ticker);return json(res,200,data);}
     if(req.method==='POST'&&url.pathname==='/api/score'){let body='';for await(const chunk of req){body+=chunk;if(body.length>100000)throw Object.assign(new Error('Request too large.'),{status:413});}const input=JSON.parse(body||'{}');return json(res,200,score(input.metrics||{},input.weights,input.cutoff));}
-    if(req.method==='GET'&&(url.pathname==='/'||url.pathname==='/index.html'))return await serveFile(res);
     return json(res,404,{error:'Not found'});
   }catch(e){console.error(e.message);return json(res,e.status||502,{error:e.message||'Upstream request failed.'});}
+}
+const server=http.createServer(async(req,res)=>{
+  const url=new URL(req.url,'http://localhost');
+  if(url.pathname.startsWith('/api/'))return handleApi(req,res,url);
+  if(req.method==='GET'&&(url.pathname==='/'||url.pathname==='/index.html'))return serveFile(res);
+  return json(res,404,{error:'Not found'});
 });
-server.listen(PORT,()=>console.log(`StockScore backend listening at http://localhost:${PORT} (${MODE} mode)`));
+if(process.argv[1]&&pathToFileURL(path.resolve(process.argv[1])).href===import.meta.url)server.listen(PORT,()=>console.log(`StockScore backend listening at http://localhost:${PORT} (${MODE} mode)`));
 
