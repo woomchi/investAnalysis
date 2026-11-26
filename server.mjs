@@ -14,25 +14,16 @@ try {
 } catch {}
 
 const PORT = Number(process.env.PORT || 3000);
-const MODE = (process.env.DATA_MODE || 'demo').toLowerCase();
-const SEC_UA = process.env.SEC_USER_AGENT;
+const MODE = (process.env.DATA_MODE || 'live').toLowerCase();
+const SEC_UA = process.env.SEC_USER_AGENT || 'StockScoreAI contact@example.com';
 const TOSS_ID = process.env.TOSS_CLIENT_ID;
 const TOSS_SECRET = process.env.TOSS_CLIENT_SECRET;
 const cache = new Map();
 let tickerMapCache;
 let tossToken;
 let tossTokenExpires = 0;
-const DEMO = {
-  NVDA: { name:'NVIDIA Corporation', sector:'Semiconductor · AI Infrastructure', price:142.87, currency:'USD', growth:114, margin:62, fcf:58, debt:18, valuation:28, model:'GPU and accelerated computing platforms for data centers.', moat:'CUDA ecosystem and developer tools create switching costs.', risk:'AI spending concentration and export controls may increase volatility.' },
-  MSFT: { name:'Microsoft Corporation', sector:'Software · Cloud', price:415.32, currency:'USD', growth:15, margin:45, fcf:42, debt:22, valuation:37, model:'Cloud, productivity software, and enterprise services on subscriptions.', moat:'Enterprise reach and integrated productivity products support distribution.', risk:'Cloud competition and AI infrastructure spending need monitoring.' },
-  AAPL: { name:'Apple Inc.', sector:'Hardware · Services', price:232.15, currency:'USD', growth:6, margin:31, fcf:29, debt:48, valuation:20, model:'Hardware sales connected to a services and subscription ecosystem.', moat:'Brand strength and device integration support customer loyalty.', risk:'Device replacement cycles and China exposure are key variables.' },
-  GOOGL: { name:'Alphabet Inc.', sector:'Internet · Cloud', price:176.14, currency:'USD', growth:14, margin:32, fcf:35, debt:12, valuation:49, model:'Search and YouTube advertising, with Google Cloud as a growth business.', moat:'Search data and ad platform scale help advertiser effectiveness.', risk:'AI changes in search and regulatory cases create uncertainty.' },
-  AMZN: { name:'Amazon.com, Inc.', sector:'E-commerce · Cloud', price:225.94, currency:'USD', growth:11, margin:18, fcf:31, debt:32, valuation:41, model:'Online retail, subscriptions, and AWS cloud infrastructure.', moat:'Logistics, Prime membership, and AWS scale reinforce one another.', risk:'Retail margins and capital spending affect cash generation.' },
-  META: { name:'Meta Platforms, Inc.', sector:'Internet · Digital Advertising', price:602.8, currency:'USD', growth:22, margin:42, fcf:37, debt:8, valuation:34, model:'Advertising across Facebook and Instagram with messaging platforms.', moat:'Large user network and ad targeting capabilities are core strengths.', risk:'Regulation, ad cycles, and Reality Labs spending are key risks.' },
-  TSLA: { name:'Tesla, Inc.', sector:'Automotive · Energy', price:338.23, currency:'USD', growth:2, margin:12, fcf:13, debt:5, valuation:8, model:'Electric vehicle sales alongside energy storage and software.', moat:'Charging network and manufacturing data offer potential advantages.', risk:'Price competition, demand variability, and valuation expectations.' }
-};
 const json = (res, status, body) => { const data=JSON.stringify(body); res.writeHead(status, {'content-type':'application/json; charset=utf-8','content-length':Buffer.byteLength(data),'cache-control':'no-store','access-control-allow-origin':'*'}); res.end(data); };
-const finite = x => Number.isFinite(Number(x)) ? Number(x) : null;
+const finite = x => x===null||x===undefined||x===''?null:(Number.isFinite(Number(x))?Number(x):null);
 function fromFacts(facts, names, unit='USD') {
   for (const name of names) {
     const entry=facts?.[name]; if (!entry) continue;
@@ -74,12 +65,11 @@ async function tossPrice(ticker) {
 function latestAnnual(facts,names) { const f=fromFacts(facts,names);return f?finite(f.val):null; }
 async function liveAnalysis(ticker) {
   if(cache.has(ticker)&&Date.now()-cache.get(ticker).at<15*60*1000) return cache.get(ticker).value;
-  if(!TOSS_ID||!TOSS_SECRET) throw new Error('Live mode requires TOSS_CLIENT_ID and TOSS_CLIENT_SECRET.');
   const tickers=await getTickerMap(),cik=tickers.get(ticker);if(!cik) throw Object.assign(new Error(`SEC has no company mapping for ${ticker}.`),{status:404});
   const [sub,factsDoc,priceData]=await Promise.all([
     secJson(`https://data.sec.gov/submissions/CIK${cik}.json`),
     secJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`),
-    tossPrice(ticker)
+    TOSS_ID&&TOSS_SECRET ? tossPrice(ticker) : Promise.resolve(null)
   ]);
   const facts=factsDoc.facts?.['us-gaap']||{};
   const revenue=fromFacts(facts,['RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet']);
@@ -89,26 +79,33 @@ async function liveAnalysis(ticker) {
   const debt=fromFacts(facts,['LongTermDebtAndFinanceLeaseObligationsCurrent','LongTermDebtCurrent']);
   const longDebt=fromFacts(facts,['LongTermDebtAndFinanceLeaseObligations','LongTermDebtNoncurrent']);
   const equity=fromFacts(facts,['StockholdersEquity']);
-  const latestRev=finite(revenue?.val), latestOp=finite(operating?.val), latestCfo=finite(cfo?.val), latestCapex=finite(capex?.val);
+  const netIncome=fromFacts(facts,['NetIncomeLoss']);
+  const shares=fromFacts(factsDoc.facts?.dei||{},['EntityCommonStockSharesOutstanding'],'shares');
+  const latestRev=finite(revenue?.val), latestOp=finite(operating?.val), latestCfo=finite(cfo?.val), latestCapex=finite(capex?.val), latestIncome=finite(netIncome?.val), sharesOutstanding=finite(shares?.val);
   let growth=null;
   if(revenue){const previous=(revenue.units?.[revenue.uom]||[]).filter(x=>x.form===revenue.form&&x.end<revenue.end&&Math.abs(new Date(revenue.end)-new Date(x.end))>300*864e5).sort((a,b)=>String(b.end).localeCompare(String(a.end)))[0];if(previous&&finite(previous.val)!==0)growth=(latestRev/Number(previous.val)-1)*100;}
   const opMargin=latestRev&&latestOp!==null?latestOp/latestRev*100:null;
-  const fcf=latestCfo!==null&&latestCapex!==null?(latestCfo-Math.abs(latestCapex))/Math.max(Math.abs(latestCfo),1)*100:null;
+  const fcf=latestCfo!==null&&latestCapex!==null&&latestRev?((latestCfo-Math.abs(latestCapex))/latestRev)*100:null;
   const liabilities=(finite(debt?.val)||0)+(finite(longDebt?.val)||0), equityValue=finite(equity?.val);
   const debtRatio=equityValue&&equityValue>0?liabilities/equityValue*100:null;
   const company=sub?.name||ticker;
-  const out={ticker,name:company,sector:'US listed · SEC filing',price:priceData.price,currency:priceData.currency,priceAsOf:priceData.timestamp,growth,margin:opMargin,fcf,debt:debtRatio,valuation:null,model:'SEC company facts provide financial filings; add a licensed company profile source for a dependable business description.',moat:'Not inferred from filings in this MVP.',risk:'Financial facts can be issuer-specific; inspect the cited SEC filing and period.',source:'SEC Company Facts + Toss prices',asOf:revenue?.end||null,demo:false,raw:{revenue:latestRev,operatingIncome:latestOp,operatingCashFlow:latestCfo,capitalExpenditures:latestCapex,totalDebt:liabilities,equity:equityValue}};
+  const marketCap=priceData?.price&&sharesOutstanding?priceData.price*sharesOutstanding:null;
+  const periodsPerYear=revenue?.form==='10-Q'?4:1;
+  const earningsForValuation=latestIncome!==null?latestIncome*periodsPerYear:null;
+  const salesForValuation=latestRev!==null?latestRev*periodsPerYear:null;
+  const valuation=marketCap&&earningsForValuation>0?marketCap/earningsForValuation:marketCap&&salesForValuation>0?marketCap/salesForValuation:null;
+  const valuationBasis=marketCap&&earningsForValuation>0?'approx. annualized P/E':marketCap&&salesForValuation>0?'approx. annualized P/S':null;
+  const out={ticker,name:company,sector:'US listed · SEC filing',price:priceData?.price??null,currency:priceData?.currency||'USD',priceAsOf:priceData?.timestamp||null,growth,margin:opMargin,fcf,debt:debtRatio,valuation,valuationBasis,model:null,moat:null,risk:null,source:priceData?'SEC Company Facts + Toss prices':'SEC Company Facts (Toss credentials not configured)',asOf:revenue?.end||null,raw:{revenue:latestRev,operatingIncome:latestOp,operatingCashFlow:latestCfo,capitalExpenditures:latestCapex,totalDebt:liabilities,equity:equityValue,netIncome:latestIncome,sharesOutstanding,marketCap}};
   cache.set(ticker,{at:Date.now(),value:out});return out;
 }
-function demoAnalysis(ticker){const row=DEMO[ticker];if(!row)throw Object.assign(new Error(`No demo record for ${ticker}.`),{status:404});return {ticker,...row,source:'Bundled demo data',asOf:'Demo',demo:true};}
 function score(metrics,weights,cutoff=75){const keys=['growth','margin','fcf','debt','valuation'];const w=weights||{growth:25,margin:25,fcf:20,debt:15,valuation:15};const total=keys.reduce((n,k)=>n+(Number(w[k])||0),0);if(total!==100)throw Object.assign(new Error('Weights must sum to 100.'),{status:400});const parts={growth:Math.min(100,Math.max(0,(metrics.growth??0)*.7+25)),margin:Math.min(100,(metrics.margin??0)*1.45),fcf:Math.min(100,(metrics.fcf??0)*1.55),debt:Math.max(0,100-(metrics.debt??100)*1.35),valuation:Math.max(0,100-(metrics.valuation??100)*1.55)};const totalScore=Math.round(keys.reduce((n,k)=>n+parts[k]*Number(w[k]),0)/100);return {score:totalScore,parts,passed:totalScore>=Number(cutoff),cutoff};}
 async function serveFile(res){const html=await readFile(path.join(ROOT,'index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':html.length});res.end(html);}
 const server=http.createServer(async(req,res)=>{
   if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'});return res.end();}
   const url=new URL(req.url,'http://localhost');
   try{
-    if(req.method==='GET'&&url.pathname==='/api/health')return json(res,200,{ok:true,mode:MODE,providers:{sec:'available (no API key)',toss:Boolean(TOSS_ID&&TOSS_SECRET)},message:MODE==='demo'?'Using bundled demo data.':'Live providers enabled.'});
-    if(req.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();if(!/^[A-Z.]{1,5}$/.test(ticker))return json(res,400,{error:'Ticker must contain 1–5 letters or dots.'});const data=MODE==='live'?await liveAnalysis(ticker):demoAnalysis(ticker);return json(res,200,data);}
+    if(req.method==='GET'&&url.pathname==='/api/health')return json(res,200,{ok:true,mode:MODE,providers:{sec:'available (no API key)',toss:Boolean(TOSS_ID&&TOSS_SECRET)},message:TOSS_ID&&TOSS_SECRET?'Live SEC and Toss data enabled.':'SEC data enabled; Toss credentials missing, so price and valuation may be unavailable.'});
+    if(req.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();if(!/^[A-Z.]{1,5}$/.test(ticker))return json(res,400,{error:'Ticker must contain 1–5 letters or dots.'});const data=await liveAnalysis(ticker);return json(res,200,data);}
     if(req.method==='POST'&&url.pathname==='/api/score'){let body='';for await(const chunk of req){body+=chunk;if(body.length>100000)throw Object.assign(new Error('Request too large.'),{status:413});}const input=JSON.parse(body||'{}');return json(res,200,score(input.metrics||{},input.weights,input.cutoff));}
     if(req.method==='GET'&&(url.pathname==='/'||url.pathname==='/index.html'))return await serveFile(res);
     return json(res,404,{error:'Not found'});
