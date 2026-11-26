@@ -142,5 +142,12 @@ const server=http.createServer(async(req,res)=>{
   res.setHeader('x-request-id',requestId);
   return json(res,404,{error:'Not found',requestId});
 });
-server.listen(PORT,()=>console.log(JSON.stringify({scope:'stockscore-api',event:'server_listening',port:PORT,mode:MODE})));
+
+// Vercel imports the shared request logic from an API function. In that
+// environment the platform owns the HTTP listener; only start one for the
+// standalone local server.
+export { server };
+if (!process.env.VERCEL) {
+  server.listen(PORT,()=>console.log(JSON.stringify({scope:'stockscore-api',event:'server_listening',port:PORT,mode:MODE})));
+}
 
