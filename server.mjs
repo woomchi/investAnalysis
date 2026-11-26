@@ -16,7 +16,7 @@ try {
 
 const PORT = Number(process.env.PORT || 3000);
 const MODE = (process.env.DATA_MODE || 'live').toLowerCase();
-const SEC_UA = process.env.SEC_USER_AGENT || 'StockScoreAI contact@example.com';
+const SEC_UA = process.env.SEC_USER_AGENT;
 const TOSS_ID = process.env.TOSS_CLIENT_ID;
 const TOSS_SECRET = process.env.TOSS_CLIENT_SECRET;
 console.log(JSON.stringify({scope:'stockscore-api',event:'module_loaded',runtime:process.version,mode:MODE,providers:{sec:true,toss:Boolean(TOSS_ID&&TOSS_SECRET)}}));
