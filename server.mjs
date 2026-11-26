@@ -147,7 +147,7 @@ const server=http.createServer(async(req,res)=>{
 // environment the platform owns the HTTP listener; only start one for the
 // standalone local server.
 export { server };
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL_API_FUNCTION) {
   server.listen(PORT,()=>console.log(JSON.stringify({scope:'stockscore-api',event:'server_listening',port:PORT,mode:MODE})));
 }
 
