@@ -100,6 +100,17 @@ async function liveAnalysis(ticker) {
 }
 function score(metrics,weights,cutoff=75){const keys=['growth','margin','fcf','debt','valuation'];const w=weights||{growth:25,margin:25,fcf:20,debt:15,valuation:15};const total=keys.reduce((n,k)=>n+(Number(w[k])||0),0);if(total!==100)throw Object.assign(new Error('Weights must sum to 100.'),{status:400});const parts={growth:Math.min(100,Math.max(0,(metrics.growth??0)*.7+25)),margin:Math.min(100,(metrics.margin??0)*1.45),fcf:Math.min(100,(metrics.fcf??0)*1.55),debt:Math.max(0,100-(metrics.debt??100)*1.35),valuation:Math.max(0,100-(metrics.valuation??100)*1.55)};const totalScore=Math.round(keys.reduce((n,k)=>n+parts[k]*Number(w[k]),0)/100);return {score:totalScore,parts,passed:totalScore>=Number(cutoff),cutoff};}
 async function serveFile(res){const html=await readFile(path.join(ROOT,'index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':html.length});res.end(html);}
+export async function handleWebApi(request){
+  const url=new URL(request.url);
+  const reply=(body,status=200)=>Response.json(body,{status,headers:{'cache-control':'no-store','access-control-allow-origin':'*'}});
+  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'}});
+  try{
+    if(request.method==='GET'&&url.pathname==='/api/health')return reply({ok:true,mode:MODE,providers:{sec:'available (no API key)',toss:Boolean(TOSS_ID&&TOSS_SECRET)},message:TOSS_ID&&TOSS_SECRET?'Live SEC and Toss data enabled.':'SEC data enabled; Toss credentials missing, so price and valuation may be unavailable.'});
+    if(request.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();if(!/^[A-Z.]{1,5}$/.test(ticker))return reply({error:'Ticker must contain 1–5 letters or dots.'},400);return reply(await liveAnalysis(ticker));}
+    if(request.method==='POST'&&url.pathname==='/api/score'){const raw=await request.text();if(raw.length>100000)return reply({error:'Request too large.'},413);const input=JSON.parse(raw||'{}');return reply(score(input.metrics||{},input.weights,input.cutoff));}
+    return reply({error:'Not found'},404);
+  }catch(e){console.error(e.message);return reply({error:e.message||'Upstream request failed.'},e.status||502);}
+}
 export async function handleApi(req,res,url=new URL(req.url,'http://localhost')){
   if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'});return res.end();}
   try{
