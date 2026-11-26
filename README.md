@@ -13,7 +13,7 @@ npm start
 
 ## Vercel 배포
 
-저장소를 Vercel 프로젝트에 연결하고 기본 설정으로 배포하면 루트의 `index.html`이 정적 페이지로 제공되고 `api/` 아래 함수가 API를 처리합니다. `/api/health`와 `/api/analysis/[ticker]`는 Vercel Node.js Functions로 배포됩니다. 별도의 `PORT` 설정이나 `npm start` 실행은 필요하지 않습니다.
+저장소를 Vercel 프로젝트에 연결하고 기본 설정으로 배포합니다. Vercel은 루트의 `server.mjs`를 Node.js 서버 엔트리포인트로 선택하므로, 서버가 `process.env.PORT`에서 수신 대기하고 페이지와 `/api/*` 경로를 함께 처리합니다. 배포 환경의 포트는 Vercel이 제공합니다.
 
 SEC API 요청에 사용할 실제 연락처가 포함된 `SEC_USER_AGENT`를 Vercel 프로젝트의 Environment Variables에 등록하세요. Toss 시세를 사용하려면 `TOSS_CLIENT_ID`와 `TOSS_CLIENT_SECRET`도 등록하고, 설정 변경 후 다시 배포해야 합니다. Toss 자격증명이 없어도 SEC 재무 데이터 분석은 가능합니다.
 
