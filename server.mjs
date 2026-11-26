@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -18,11 +19,25 @@ const MODE = (process.env.DATA_MODE || 'live').toLowerCase();
 const SEC_UA = process.env.SEC_USER_AGENT || 'StockScoreAI contact@example.com';
 const TOSS_ID = process.env.TOSS_CLIENT_ID;
 const TOSS_SECRET = process.env.TOSS_CLIENT_SECRET;
+console.log(JSON.stringify({scope:'stockscore-api',event:'module_loaded',runtime:process.version,mode:MODE,providers:{sec:true,toss:Boolean(TOSS_ID&&TOSS_SECRET)}}));
 const cache = new Map();
 let tickerMapCache;
 let tossToken;
 let tossTokenExpires = 0;
 const json = (res, status, body) => { const data=JSON.stringify(body); res.writeHead(status, {'content-type':'application/json; charset=utf-8','content-length':Buffer.byteLength(data),'cache-control':'no-store','access-control-allow-origin':'*'}); res.end(data); };
+const makeTrace = requestId => (event, details={}) => console.log(JSON.stringify({scope:'stockscore-api',requestId,event,...details}));
+async function fetchWithTrace(provider,url,options={},trace){
+  const target=new URL(url),started=Date.now();
+  trace?.('provider_request_started',{provider,target:`${target.hostname}${target.pathname}`});
+  try{
+    const response=await fetch(url,options);
+    trace?.('provider_response_received',{provider,target:`${target.hostname}${target.pathname}`,status:response.status,durationMs:Date.now()-started});
+    return response;
+  }catch(error){
+    trace?.('provider_request_failed',{provider,target:`${target.hostname}${target.pathname}`,durationMs:Date.now()-started,errorName:error.name,errorMessage:error.message});
+    throw error;
+  }
+}
 const finite = x => x===null||x===undefined||x===''?null:(Number.isFinite(Number(x))?Number(x):null);
 function fromFacts(facts, names, unit='USD') {
   for (const name of names) {
@@ -33,29 +48,29 @@ function fromFacts(facts, names, unit='USD') {
   }
   return null;
 }
-async function secJson(url) {
-  const r=await fetch(url,{headers:{'User-Agent':SEC_UA,'Accept-Encoding':'gzip, deflate','Accept':'application/json'}});
+async function secJson(url,trace) {
+  const r=await fetchWithTrace('sec',url,{headers:{'User-Agent':SEC_UA,'Accept-Encoding':'gzip, deflate','Accept':'application/json'}},trace);
   if(!r.ok) throw new Error(`SEC returned HTTP ${r.status}`);
   return r.json();
 }
-async function getTickerMap() {
+async function getTickerMap(trace) {
   if(tickerMapCache) return tickerMapCache;
-  const data=await secJson('https://www.sec.gov/files/company_tickers.json');
+  const data=await secJson('https://www.sec.gov/files/company_tickers.json',trace);
   tickerMapCache=new Map(Object.values(data).map(x=>[String(x.ticker).toUpperCase(),String(x.cik_str).padStart(10,'0')]));
   return tickerMapCache;
 }
-async function getTossToken() {
+async function getTossToken(trace) {
   if(tossToken && Date.now()<tossTokenExpires-60000) return tossToken;
   const form=new URLSearchParams({grant_type:'client_credentials',client_id:TOSS_ID,client_secret:TOSS_SECRET});
-  const r=await fetch('https://openapi.tossinvest.com/oauth2/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:form});
+  const r=await fetchWithTrace('toss-token','https://openapi.tossinvest.com/oauth2/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:form},trace);
   const data=await r.json();
   if(!r.ok||!data.access_token) throw new Error(`Toss token request failed (HTTP ${r.status})`);
   tossToken=data.access_token;tossTokenExpires=Date.now()+(Number(data.expires_in||86400)*1000);return tossToken;
 }
-async function tossPrice(ticker) {
-  const token=await getTossToken();
+async function tossPrice(ticker,trace) {
+  const token=await getTossToken(trace);
   const url=new URL('https://openapi.tossinvest.com/api/v1/prices');url.searchParams.set('symbols',ticker);
-  const r=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});
+  const r=await fetchWithTrace('toss-price',url,{headers:{Authorization:`Bearer ${token}`}},trace);
   const data=await r.json();
   if(!r.ok) throw new Error(`Toss prices request failed (HTTP ${r.status})`);
   const row=(data.result||[]).find(x=>String(x.symbol).toUpperCase()===ticker);
@@ -63,13 +78,13 @@ async function tossPrice(ticker) {
   return {price:finite(row.lastPrice),currency:row.currency||'USD',timestamp:row.timestamp};
 }
 function latestAnnual(facts,names) { const f=fromFacts(facts,names);return f?finite(f.val):null; }
-async function liveAnalysis(ticker) {
+async function liveAnalysis(ticker,trace) {
   if(cache.has(ticker)&&Date.now()-cache.get(ticker).at<15*60*1000) return cache.get(ticker).value;
-  const tickers=await getTickerMap(),cik=tickers.get(ticker);if(!cik) throw Object.assign(new Error(`SEC has no company mapping for ${ticker}.`),{status:404});
+  const tickers=await getTickerMap(trace),cik=tickers.get(ticker);if(!cik) throw Object.assign(new Error(`SEC has no company mapping for ${ticker}.`),{status:404});
   const [sub,factsDoc,priceData]=await Promise.all([
-    secJson(`https://data.sec.gov/submissions/CIK${cik}.json`),
-    secJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`),
-    TOSS_ID&&TOSS_SECRET ? tossPrice(ticker) : Promise.resolve(null)
+    secJson(`https://data.sec.gov/submissions/CIK${cik}.json`,trace),
+    secJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`,trace),
+    TOSS_ID&&TOSS_SECRET ? tossPrice(ticker,trace) : Promise.resolve(null)
   ]);
   const facts=factsDoc.facts?.['us-gaap']||{};
   const revenue=fromFacts(facts,['RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet']);
@@ -102,14 +117,26 @@ function score(metrics,weights,cutoff=75){const keys=['growth','margin','fcf','d
 async function serveFile(res){const html=await readFile(path.join(ROOT,'index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','content-length':html.length});res.end(html);}
 export async function handleWebApi(request){
   const url=new URL(request.url);
-  const reply=(body,status=200)=>Response.json(body,{status,headers:{'cache-control':'no-store','access-control-allow-origin':'*'}});
-  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'}});
+  const incomingId=request.headers.get('x-vercel-id')||request.headers.get('x-request-id');
+  const requestId=incomingId&&/^[\w.:-]{1,120}$/.test(incomingId)?incomingId:randomUUID();
+  const trace=makeTrace(requestId),started=Date.now();
+  let stage='routing';
+  trace('request_started',{method:request.method,path:url.pathname});
+  const reply=(body,status=200)=>{
+    trace('request_completed',{status,durationMs:Date.now()-started});
+    const responseBody=status>=400?{...body,requestId}:body;
+    return Response.json(responseBody,{status,headers:{'cache-control':'no-store','access-control-allow-origin':'*','x-request-id':requestId}});
+  };
+  if(request.method==='OPTIONS'){
+    trace('request_completed',{status:204,durationMs:Date.now()-started});
+    return new Response(null,{status:204,headers:{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type','x-request-id':requestId}});
+  }
   try{
     if(request.method==='GET'&&url.pathname==='/api/health')return reply({ok:true,mode:MODE,providers:{sec:'available (no API key)',toss:Boolean(TOSS_ID&&TOSS_SECRET)},message:TOSS_ID&&TOSS_SECRET?'Live SEC and Toss data enabled.':'SEC data enabled; Toss credentials missing, so price and valuation may be unavailable.'});
-    if(request.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();if(!/^[A-Z.]{1,5}$/.test(ticker))return reply({error:'Ticker must contain 1–5 letters or dots.'},400);return reply(await liveAnalysis(ticker));}
-    if(request.method==='POST'&&url.pathname==='/api/score'){const raw=await request.text();if(raw.length>100000)return reply({error:'Request too large.'},413);const input=JSON.parse(raw||'{}');return reply(score(input.metrics||{},input.weights,input.cutoff));}
+    if(request.method==='GET'&&url.pathname.startsWith('/api/analysis/')){const ticker=decodeURIComponent(url.pathname.split('/').pop()).toUpperCase();trace('analysis_started',{ticker});if(!/^[A-Z.]{1,5}$/.test(ticker))return reply({error:'Ticker must contain 1–5 letters or dots.'},400);stage='live_analysis';const data=await liveAnalysis(ticker,trace);return reply(data);}
+    if(request.method==='POST'&&url.pathname==='/api/score'){stage='score';const raw=await request.text();if(raw.length>100000)return reply({error:'Request too large.'},413);const input=JSON.parse(raw||'{}');return reply(score(input.metrics||{},input.weights,input.cutoff));}
     return reply({error:'Not found'},404);
-  }catch(e){console.error(e.message);return reply({error:e.message||'Upstream request failed.'},e.status||502);}
+  }catch(e){trace('request_failed',{stage,status:e.status||502,errorName:e.name||'Error',errorMessage:e.message||'Unknown error',stack:e.stack});return reply({error:e.message||'Upstream request failed.'},e.status||502);}
 }
 export async function handleApi(req,res,url=new URL(req.url,'http://localhost')){
   if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'});return res.end();}
